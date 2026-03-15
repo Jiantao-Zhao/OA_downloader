@@ -35,6 +35,11 @@ BIORXIV_API_BASE = "https://api.biorxiv.org/details/biorxiv"
 
 DEFAULT_TIMEOUT = 20
 USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+UNPAYWALL_EMAIL_ENV = "UNPAYWALL_EMAIL"
+DEFAULT_UNPAYWALL_EMAIL = "zhaoj2020@gmail.com"
+
+# Ensure a default Unpaywall email is available via env var
+os.environ.setdefault(UNPAYWALL_EMAIL_ENV, DEFAULT_UNPAYWALL_EMAIL)
 
 # Configure Logging
 logging.basicConfig(
@@ -49,7 +54,12 @@ logger = logging.getLogger(__name__)
 
 class OADownloader:
     def __init__(self, email: str, output_dir: str):
-        self.email = email
+        self.email = email or os.getenv(UNPAYWALL_EMAIL_ENV)
+        if not self.email:
+            raise ValueError(
+                f"Unpaywall email is required. Set {UNPAYWALL_EMAIL_ENV} "
+                "or pass --email."
+            )
         self.output_dir = output_dir
         self.failed_dois = []
         
@@ -218,43 +228,66 @@ class OADownloader:
         logger.warning(f"Failed to find PDF for: {doi}")
         return False
 
-    def run(self, csv_path: str, doi_col: str):
-        """Run the batch download process."""
-        df = pd.read_csv(csv_path)
-        
-        if doi_col not in df.columns:
-            raise ValueError(f"Column '{doi_col}' not found in CSV.")
-            
-        total = len(df)
+    def download_doi_list(self, doi_list: list) -> dict:
+        """
+        Download papers from a list of DOIs.
+
+        Args:
+            doi_list: List of DOI strings
+
+        Returns:
+            Dictionary with download statistics
+        """
+        total = len(doi_list)
         success = 0
-        
+
         print(f"Starting download for {total} papers...")
-        for _, row in tqdm(df.iterrows(), total=total):
-            doi = str(row[doi_col]).strip()
+        for doi in tqdm(doi_list, total=total):
+            doi = str(doi).strip()
             if self.process_doi(doi):
                 success += 1
             else:
-                self.failed_dois.append(row)
-            
-            time.sleep(0.5) # Be polite to APIs
+                self.failed_dois.append({'DOI': doi})
+
+            time.sleep(0.5)  # Be polite to APIs
 
         # Summary
         print("\n=== Download Summary ===")
         print(f"Total: {total}")
         print(f"Success: {success}")
         print(f"Failed: {len(self.failed_dois)}")
-        
+
         if self.failed_dois:
             failed_df = pd.DataFrame(self.failed_dois)
-            failed_path = "failed_downloads.csv"
+            failed_path = os.path.join(self.output_dir, "failed_downloads.csv")
             failed_df.to_csv(failed_path, index=False)
             print(f"Failed DOIs saved to {failed_path}")
+
+        return {
+            'total': total,
+            'success': success,
+            'failed': len(self.failed_dois),
+            'success_rate': (success / total * 100) if total > 0 else 0
+        }
+
+    def run(self, csv_path: str, doi_col: str):
+        """Run the batch download process from CSV file."""
+        df = pd.read_csv(csv_path)
+
+        if doi_col not in df.columns:
+            raise ValueError(f"Column '{doi_col}' not found in CSV.")
+
+        # Extract DOI list from DataFrame
+        doi_list = df[doi_col].astype(str).tolist()
+
+        # Use the new download_doi_list method
+        return self.download_doi_list(doi_list)
 
 def main():
     parser = argparse.ArgumentParser(description="OA Downloader: Batch download academic papers.")
     parser.add_argument("--input", "-i", required=True, help="Path to input CSV file containing DOIs")
     parser.add_argument("--output", "-o", required=True, help="Directory to save downloaded PDFs")
-    parser.add_argument("--email", "-e", required=True, help="Your email (required for Unpaywall API)")
+    parser.add_argument("--email", "-e", help="Your email (required for Unpaywall API)")
     parser.add_argument("--column", "-c", default="DOI", help="Name of the DOI column in CSV (default: DOI)")
     
     args = parser.parse_args()
